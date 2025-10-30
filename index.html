@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width,initial-scale=1" />
+	<title>BTS - Demo</title>
+	<style>
+		body{font-family:Segoe UI,Roboto,Arial;margin:0;background:#0f172a;color:#cbd5e1}
+		.wrap{padding:16px;max-width:1000px;margin:0 auto}
+		.controls{display:flex;gap:12px;align-items:center;margin-bottom:12px}
+		canvas{background:#071029;border-radius:6px;display:block}
+		#charts{display:grid;grid-template-columns:2fr 1fr;gap:12px;height:420px}
+		table{width:100%;border-collapse:collapse;margin-top:12px}
+		table td, table th{padding:6px;border:1px solid rgba(203,213,225,.06)}
+		.badge{background:#0ea5a4;padding:6px 8px;border-radius:6px;color:#021125}
+	</style>
+	<!-- Chart.js (CDN) -->
+	<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+			<!-- html2canvas + jsPDF para exportar a PDF -->
+			<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+			<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+			<!-- Chart.js DataLabels plugin -->
+			<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+</head>
+<body>
+	<div class="wrap">
+		<h1>BTS - Visualización</h1>
+		<div class="controls">
+			<button id="btnSort">Ordenar</button>
+			<div id="totalBadge" class="badge">Total: 0</div>
+		</div>
+
+		<div id="charts">
+			<div style="min-height:100%;">
+				<canvas id="barChart"></canvas>
+			</div>
+			<div style="min-height:100%;">
+				<canvas id="pieChart"></canvas>
+			</div>
+		</div>
+
+			<!-- Panel administrativo -->
+			<section id="adminPanel" style="margin-top:18px;padding:12px;background:rgba(255,255,255,.02);border-radius:8px">
+				<h2>Panel administrativo</h2>
+				<div style="display:flex;gap:12px;flex-wrap:wrap">
+					<div style="flex:1 1 320px;min-width:260px">
+						<h3>Categorías</h3>
+						<div id="categoryList"></div>
+						<div style="display:flex;gap:8px;margin-top:8px">
+							<input id="newCatLabel" placeholder="Etiqueta" />
+							<input id="newCatColor" type="color" value="#ef4444" style="width:56px" />
+							<button id="btnAddCategory">Añadir</button>
+						</div>
+					</div>
+
+					<div style="flex:1 1 320px;min-width:260px">
+						<h3>Personas</h3>
+						<div id="personList"></div>
+						<div style="display:flex;gap:8px;margin-top:8px">
+							<input id="newPersonName" placeholder="Nombre" />
+							<button id="btnAddPerson">Añadir</button>
+						</div>
+					</div>
+
+					<div style="flex:1 1 320px;min-width:260px">
+						<h3>Entradas</h3>
+						<div style="display:flex;gap:8px;align-items:center">
+							<select id="selPerson"></select>
+							<select id="selCategory"></select>
+							<input id="entryValue" type="number" min="0" value="1" style="width:64px" />
+							<button id="btnAddEntry">Agregar</button>
+						</div>
+						<div style="margin-top:8px">
+										<button id="btnClearData">Limpiar datos</button>
+										<button id="btnExportPdf">Exportar a PDF</button>
+						</div>
+					</div>
+				</div>
+			</section>
+
+			<table id="dataTable">
+				<tr><td>No hay datos (demo)</td></tr>
+			</table>
+	</div>
+
+	<script>
+	// --- Stubs y valores mínimos para evitar errores si faltan funciones externas ---
+	let barChart = null, pieChart = null;
+	const CATEGORIES = [ { key: 'cat1', label: 'Categoría 1', color: '#ef4444' }, { key: 'cat2', label: 'Categoría 2', color: '#3b82f6' } ];
+	const state = { people: [], entries: [] };
+		const uid = ()=>Math.random().toString(36).slice(2,9);
+		// helper: darken a hex color by percent (0-100)
+		function darkenHex(hex, percent){
+			try{
+				hex = hex.replace('#','');
+				if(hex.length===3) hex = hex.split('').map(h=>h+h).join('');
+				const num = parseInt(hex,16);
+				let r = (num>>16) & 0xFF;
+				let g = (num>>8) & 0xFF;
+				let b = num & 0xFF;
+				r = Math.max(0, Math.min(255, Math.round(r * (1 - percent/100))));
+				g = Math.max(0, Math.min(255, Math.round(g * (1 - percent/100))));
+				b = Math.max(0, Math.min(255, Math.round(b * (1 - percent/100))));
+				return '#'+((1<<24) + (r<<16) + (g<<8) + b).toString(16).slice(1);
+			}catch(e){ return hex; }
+		}
+		// Persistencia simple en localStorage
+		const STORAGE_KEY = 'bts_state_v1';
+		function saveState(){
+			try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+			catch(e){ console.warn('No se pudo guardar estado', e); }
+		}
+		function loadState(){
+			try{
+				const raw = localStorage.getItem(STORAGE_KEY);
+				if(raw){ const s = JSON.parse(raw); state.people = s.people||[]; state.entries = s.entries||[]; if(s.categories) { CATEGORIES.length = 0; for(const c of s.categories) CATEGORIES.push(c); } }
+			}catch(e){ console.warn('No se pudo leer estado', e); }
+		}
+		function refreshCategorySelect(){
+			const sel = document.getElementById('selCategory');
+			if(!sel) return;
+			sel.innerHTML = '';
+			for(const c of CATEGORIES){ const opt = document.createElement('option'); opt.value = c.key; opt.textContent = c.label; sel.appendChild(opt); }
+			renderCategoryList();
+		}
+		function refreshPersonSelect(){
+			const sel = document.getElementById('selPerson');
+			if(!sel) return;
+			sel.innerHTML = '';
+			for(const p of state.people){ const opt = document.createElement('option'); opt.value = p; opt.textContent = p; sel.appendChild(opt); }
+			renderPersonList();
+		}
+
+		function renderCategoryList(){
+			const root = document.getElementById('categoryList'); if(!root) return; root.innerHTML = '';
+			for(const c of CATEGORIES){
+				const el = document.createElement('div'); el.style.display='flex'; el.style.alignItems='center'; el.style.gap='8px'; el.style.marginBottom='6px';
+				const sw = document.createElement('span'); sw.textContent = c.label; sw.style.background = c.color; sw.style.color = '#021125'; sw.style.padding='4px 8px'; sw.style.borderRadius='6px';
+				const btn = document.createElement('button'); btn.textContent='Eliminar'; btn.addEventListener('click', ()=>{ if(confirm('Eliminar categoría?')){ const idx = CATEGORIES.findIndex(x=>x.key===c.key); if(idx>=0) CATEGORIES.splice(idx,1); saveState(); refreshCategorySelect(); renderAll(); } });
+				el.appendChild(sw); el.appendChild(btn); root.appendChild(el);
+			}
+		}
+		function renderPersonList(){
+			const root = document.getElementById('personList'); if(!root) return; root.innerHTML = '';
+			for(const p of state.people){
+				const el = document.createElement('div'); el.style.display='flex'; el.style.alignItems='center'; el.style.gap='8px'; el.style.marginBottom='6px';
+				const span = document.createElement('span'); span.textContent = p;
+				const btn = document.createElement('button'); btn.textContent='Eliminar'; btn.addEventListener('click', ()=>{ if(confirm('Eliminar persona? (También eliminará sus entradas)')){ state.people = state.people.filter(x=>x!==p); state.entries = state.entries.filter(e=>e.person!==p); saveState(); refreshPersonSelect(); renderAll(); } });
+				el.appendChild(span); el.appendChild(btn); root.appendChild(el);
+			}
+		}
+			function renderTable(){
+				const table = document.getElementById('dataTable');
+				if(!state.entries || state.entries.length===0){
+					table.innerHTML = '<tr><td>No hay entradas.</td></tr>';
+					return;
+				}
+				let html = '<thead><tr><th>Persona</th><th>Categoría</th><th>Valor</th></tr></thead><tbody>';
+				for(const e of state.entries){ html += `<tr><td>${e.person}</td><td>${e.categoryKey}</td><td>${e.value}</td></tr>`; }
+				html += '</tbody>';
+				table.innerHTML = html;
+			}
+	function buildBarData(sorted=false){
+		// Devuelve estructura mínima que Chart.js acepta
+		const labels = CATEGORIES.map(c=>c.label);
+		const values = CATEGORIES.map(()=>Math.floor(Math.random()*6));
+		const bg = CATEGORIES.map(c=>c.color);
+		const borders = bg.map(h=>darkenHex(h,40)); // make borders darker
+		return { labels, datasets: [{ label: 'Demo', data: values, backgroundColor: bg, borderColor: borders, borderWidth: 2 }] };
+	}
+	function totalsByCategory(){
+		const totals = {};
+		CATEGORIES.forEach(c=>totals[c.key]=0);
+		// sumar entradas si existen
+		for(const e of state.entries){ if(totals[e.categoryKey] !== undefined) totals[e.categoryKey] += Number(e.value)||0; }
+		return totals;
+	}
+
+	// --- Código original (adaptado para ejecutarse dentro de este <script>) ---
+	function drawBar(sorted=false){
+	const data = buildBarData(sorted);
+	const ctx = document.getElementById('barChart').getContext('2d');
+	if(barChart) barChart.destroy();
+		barChart = new Chart(ctx, {
+		type: 'bar',
+		data,
+		plugins: [ChartDataLabels],
+		options: {
+		responsive: true,
+		maintainAspectRatio: false,
+		scales: {
+		x: { stacked: true, ticks: { color: '#94a3b8' }, grid:{ display:false } },
+		y: { stacked: true, ticks: { color: '#94a3b8' }, grid:{ color: 'rgba(148,163,184,.2)'} }
+		},
+		plugins: {
+		legend: { labels: { color: '#cbd5e1' } },
+		tooltip: { backgroundColor: 'rgba(15,23,42,.9)' },
+		datalabels: {
+			color: '#ffffff',
+			anchor: 'end',
+			align: 'start',
+			formatter: function(value, ctx){
+				try{
+					const dataArr = ctx.dataset.data || [];
+					const sum = dataArr.reduce((a,b)=>a + (Number(b)||0), 0);
+					if(!sum) return '';
+					return (Number(value)/sum*100).toFixed(1) + '%';
+				}catch(e){ return '' }
+			},
+			font: { weight: '600', size: 11 }
+		}
+		}
+		}
+		});
+	}
+
+
+	function drawPie(){
+	const totals = totalsByCategory();
+	const labels = CATEGORIES.map(c=>c.label);
+	const values = CATEGORIES.map(c=>totals[c.key]);
+	const colors = CATEGORIES.map(c=>c.color);
+	document.getElementById('totalBadge').textContent = `Total: ${values.reduce((a,b)=>a+b,0)}`;
+
+
+	const ctx = document.getElementById('pieChart').getContext('2d');
+	if(pieChart) pieChart.destroy();
+		pieChart = new Chart(ctx, {
+		type: 'pie',
+			data: { labels, datasets: [{ data: values, backgroundColor: colors, borderColor: colors.map(c=>darkenHex(c,50)), borderWidth: 2 }] },
+		plugins: [ChartDataLabels],
+		options: {
+		responsive: true,
+		maintainAspectRatio: false,
+		plugins: { 
+			legend: { labels: { color: '#cbd5e1' } },
+			tooltip: { backgroundColor: 'rgba(15,23,42,.9)' },
+			datalabels: {
+				color: '#ffffff',
+				formatter: function(value, ctx){
+					try{
+						const data = ctx.chart.data.datasets[0].data;
+						const sum = data.reduce((a,b)=>a + (Number(b)||0), 0);
+						if(!sum) return '';
+						return (Number(value)/sum*100).toFixed(1) + '%';
+					}catch(e){ return '' }
+				},
+				font: { weight: '600', size: 12 }
+			}
+		}
+		}
+		});
+	}
+
+
+	document.getElementById('btnSort').addEventListener('click', () => {
+	sortedFlag = !sortedFlag; drawBar(sortedFlag);
+	});
+
+
+	// ---- Render completo ----
+	let sortedFlag = false;
+	function renderAll(){
+	renderTable();
+	drawBar(sortedFlag);
+	drawPie();
+	}
+
+
+	// Inicializar
+	(function init(){
+		// cargar estado desde storage si existe
+		loadState();
+		// si no hay categorías guardadas (demo), usa las por defecto
+		if(CATEGORIES.length===0){ CATEGORIES.push({ key: 'cat1', label: 'Categoría 1', color: '#ef4444' }); CATEGORIES.push({ key: 'cat2', label: 'Categoría 2', color: '#3b82f6' }); }
+	refreshCategorySelect();
+	refreshPersonSelect();
+	// demo opcional si está vacío
+	if(state.people.length === 0 && state.entries.length === 0){
+	state.people = ['C. Luis Toyo','P/I. Morales','P/I. Larreal','Insp. Vargas','Dttve. Díaz','Dttve. Oviedo','Dttve. Mijares','Dttve. Ortega','Dttve. Colina'];
+	const rnd = (a,b)=>Math.floor(Math.random()*(b-a+1))+a;
+	for(const p of state.people){
+	for(const c of CATEGORIES){ if(Math.random()<0.6) state.entries.push({id:uid(), person:p, categoryKey:c.key, value:rnd(0,4)}); }
+	}
+	saveState();
+	}
+	renderAll();
+	})();
+
+		// --- Admin event wiring ---
+		document.getElementById('btnAddCategory').addEventListener('click', ()=>{
+			const lbl = document.getElementById('newCatLabel').value.trim();
+			const color = document.getElementById('newCatColor').value;
+			if(!lbl){ alert('Ingrese una etiqueta'); return; }
+			const key = lbl.toLowerCase().replace(/\s+/g,'_') + '_' + uid();
+			CATEGORIES.push({ key, label: lbl, color });
+			saveState(); refreshCategorySelect(); document.getElementById('newCatLabel').value='';
+		});
+
+		document.getElementById('btnAddPerson').addEventListener('click', ()=>{
+			const name = document.getElementById('newPersonName').value.trim(); if(!name) return alert('Ingrese un nombre');
+			if(!state.people.includes(name)) state.people.push(name);
+			saveState(); refreshPersonSelect(); document.getElementById('newPersonName').value='';
+		});
+
+		document.getElementById('btnAddEntry').addEventListener('click', ()=>{
+			const person = document.getElementById('selPerson').value; const cat = document.getElementById('selCategory').value; const val = Number(document.getElementById('entryValue').value)||0;
+			if(!person || !cat) return alert('Seleccione persona y categoría');
+			state.entries.push({ id: uid(), person, categoryKey: cat, value: val });
+			saveState(); renderAll();
+		});
+
+		document.getElementById('btnClearData').addEventListener('click', ()=>{
+			if(!confirm('Limpiar todo el estado?')) return; state.people = []; state.entries = []; CATEGORIES.length = 0; saveState(); refreshCategorySelect(); refreshPersonSelect(); renderAll();
+		});
+
+			// Export to PDF: usamos html2canvas + jsPDF (se añaden los scripts CDN más abajo)
+				function exportAreaToPdf(element, filename='bts_export.pdf'){
+					// element: DOM node to capture
+					// aumentar escala para mayor nitidez en el PDF
+					html2canvas(element, { scale: 3 }).then(canvas => {
+						const imgData = canvas.toDataURL('image/png');
+						// Usar tamaño Letter (carta) en orientación portrait (vertical)
+						const pdf = new jspdf.jsPDF({ orientation: 'portrait', unit: 'pt', format: 'letter' });
+						// calcular dimensiones para mantener aspecto y caber en A4
+						const pageWidth = pdf.internal.pageSize.getWidth();
+						const pageHeight = pdf.internal.pageSize.getHeight();
+						const imgW = canvas.width;
+						const imgH = canvas.height;
+						const ratio = Math.min(pageWidth / imgW, pageHeight / imgH);
+						const dw = imgW * ratio;
+						const dh = imgH * ratio;
+						const dx = (pageWidth - dw) / 2;
+						const dy = (pageHeight - dh) / 2;
+						pdf.addImage(imgData, 'PNG', dx, dy, dw, dh);
+						pdf.save(filename);
+					}).catch(err=>{ console.error('Error exportando a PDF', err); alert('No se pudo generar PDF.'); });
+				}
+
+				// Exporta charts + tabla creando un contenedor temporal con imagenes de los canvases y la tabla clonada
+				// Esta versión genera un diseño oscuro con dos gráficos lado a lado arriba y la tabla debajo (similar a la vista)
+				function exportChartsAndTableToPdf(filename='bts_charts_table.pdf'){
+					const barCanvas = document.getElementById('barChart');
+					const pieCanvas = document.getElementById('pieChart');
+					const table = document.getElementById('dataTable');
+					if(!barCanvas || !pieCanvas || !table) return alert('Faltan elementos para exportar');
+
+					// Crear contenedor temporal (ancho fijo para consistencia)
+					const tmp = document.createElement('div');
+					tmp.style.width = '1100px';
+					tmp.style.padding = '12px';
+					// Usar tema oscuro similar a la UI para que el PDF luzca como en las imágenes
+					tmp.style.background = '#0f172a';
+					tmp.style.color = '#cbd5e1';
+					tmp.style.fontFamily = getComputedStyle(document.body).fontFamily || 'sans-serif';
+					tmp.style.boxSizing = 'border-box';
+
+					// Título
+					const title = document.createElement('h2'); title.textContent = 'BTS - Visualización'; title.style.textAlign='left'; title.style.margin='6px 0 12px 6px'; title.style.color='#cbd5e1'; title.style.fontSize='18px'; title.style.fontWeight='700';
+					tmp.appendChild(title);
+
+					// Contenedor de gráficos: dos columnas lado a lado
+					const chartsRow = document.createElement('div');
+					chartsRow.style.display = 'flex';
+					chartsRow.style.gap = '12px';
+					chartsRow.style.alignItems = 'flex-start';
+					chartsRow.style.justifyContent = 'space-between';
+
+					// Convertir canvases a imágenes
+					const barImg = new Image(); barImg.src = barCanvas.toDataURL('image/png');
+					const pieImg = new Image(); pieImg.src = pieCanvas.toDataURL('image/png');
+
+					// Estilo: ambos al 45% del ancho del contenedor de chartsRow
+					barImg.style.width = '45%'; barImg.style.display='block'; barImg.style.filter = 'saturate(1.25) contrast(1.15)'; barImg.style.borderRadius='6px';
+					pieImg.style.width = '45%'; pieImg.style.display='block'; pieImg.style.filter = 'saturate(1.25) contrast(1.15)'; pieImg.style.borderRadius='6px';
+
+					// Paneles con fondo oscuro para cada gráfico (mejora contraste en PDF)
+					const panelLeft = document.createElement('div'); panelLeft.style.flex = '0 0 48%'; panelLeft.style.background = 'rgba(7,16,41,0.9)'; panelLeft.style.padding='10px'; panelLeft.style.borderRadius='8px'; panelLeft.style.boxSizing='border-box'; panelLeft.appendChild(barImg);
+					const panelRight = document.createElement('div'); panelRight.style.flex = '0 0 48%'; panelRight.style.background = 'rgba(7,16,41,0.9)'; panelRight.style.padding='10px'; panelRight.style.borderRadius='8px'; panelRight.style.boxSizing='border-box'; panelRight.appendChild(pieImg);
+
+					chartsRow.appendChild(panelLeft); chartsRow.appendChild(panelRight);
+					tmp.appendChild(chartsRow);
+
+					// Tabla: clonada desde state para mantener orden y datos actuales
+					const tbl = document.createElement('table');
+					tbl.style.width='100%'; tbl.style.marginTop='14px'; tbl.style.borderCollapse='collapse'; tbl.style.background='transparent';
+					const thead = document.createElement('thead'); thead.innerHTML = '<tr>' +
+						'<th style="text-align:left;padding:8px 6px;border-bottom:1px solid rgba(203,213,225,.06);color:#cbd5e1;font-weight:700">Persona</th>' +
+						'<th style="text-align:left;padding:8px 6px;border-bottom:1px solid rgba(203,213,225,.06);color:#cbd5e1;font-weight:700">Categoría</th>' +
+						'<th style="text-align:right;padding:8px 6px;border-bottom:1px solid rgba(203,213,225,.06);color:#cbd5e1;font-weight:700">Valor</th>' +
+						'</tr>';
+					tbl.appendChild(thead);
+					const tbody = document.createElement('tbody');
+					for(const e of state.entries){
+						const tr = document.createElement('tr');
+						tr.innerHTML = `<td style="padding:6px 6px;border-bottom:1px solid rgba(255,255,255,.03);color:#e6eef8">${e.person}</td><td style="padding:6px 6px;border-bottom:1px solid rgba(255,255,255,.03);color:#e6eef8">${e.categoryKey}</td><td style="padding:6px 6px;border-bottom:1px solid rgba(255,255,255,.03);color:#e6eef8;text-align:right">${e.value}</td>`;
+						tbody.appendChild(tr);
+					}
+					tbl.appendChild(tbody);
+					tmp.appendChild(tbl);
+
+					// Añadir al DOM fuera de vista
+					tmp.style.position='fixed'; tmp.style.left='-10000px'; tmp.style.top='0'; document.body.appendChild(tmp);
+
+					// Ajustes de escala/seguridad
+					let desiredScale = 3;
+					const estPixels = tmp.offsetWidth * tmp.offsetHeight * desiredScale * desiredScale;
+					const MAX_PIXELS = 26000000; // umbral ligeramente mayor para capturas oscuras
+					if(estPixels > MAX_PIXELS) desiredScale = 2;
+
+					// Capturar y generar PDF Letter portrait
+					html2canvas(tmp, { scale: desiredScale, useCORS: true, backgroundColor: null }).then(canvasAll=>{
+						try{
+							const imgAll = canvasAll.toDataURL('image/png');
+							const pdf = new jspdf.jsPDF({ orientation: 'portrait', unit: 'pt', format: 'letter' });
+							const pw = pdf.internal.pageSize.getWidth(); const ph = pdf.internal.pageSize.getHeight();
+							const margin = 18; // puntos
+							const availableW = pw - margin*2; const availableH = ph - margin*2;
+							const r = Math.min(availableW / canvasAll.width, availableH / canvasAll.height);
+							const dw = canvasAll.width * r; const dh = canvasAll.height * r;
+							const dx = (pw - dw) / 2; const dy = (ph - dh) / 2;
+							pdf.addImage(imgAll, 'PNG', dx, dy, dw, dh);
+							pdf.save(filename);
+						}catch(e){ console.error('Error al crear PDF:', e); alert('Error generando PDF'); }
+						document.body.removeChild(tmp);
+					}).catch(err=>{ console.error('Error en html2canvas', err); alert('Error generando PDF (captura)'); document.body.removeChild(tmp); });
+				}
+
+					document.getElementById('btnExportPdf').addEventListener('click', ()=>{
+						// Exportar charts + tabla
+						exportChartsAndTableToPdf('bts_charts_table.pdf');
+					});
+	</script>
+</body>
+</html>
